@@ -1,0 +1,402 @@
+<html>
+
+<head>
+    <title>Cristal</title>
+    <meta http-equiv="Content-Type" content="charset=utf-8">
+    <link rel="manifest" href="manifest.json">
+    <meta name="viewport" content="user-scalable=no, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover" />
+    <link rel="apple-touch-icon" href="images/apple-touch-icon-iphone-60x60.png">
+    <link rel="apple-touch-icon" sizes="60x60" href="images/apple-touch-icon-ipad-76x76.png">
+    <link rel="apple-touch-icon" sizes="114x114" href="images/apple-touch-icon-iphone-retina-120x120.png">
+    <link rel="apple-touch-icon" sizes="144x144" href="images/apple-touch-icon-ipad-retina-152x152.png">
+    <link rel="shortcut icon" href="images/favicon.ico" type="image/x-icon">
+    <meta name="description" content="An interactive paint application">
+    <meta property="og:title" content="Cellular Expression" />
+    <meta property="og:type" content="website" />
+    <link rel="stylesheet" type="text/css" href="jquery-ui-1.8.16.custom.css" />
+    <link rel="stylesheet" type="text/css" href="main.css" />
+    <script src="jquery-1.8.2.min.js"></script>
+    <script src="jquery.mousewheel.js"></script>
+    <script src="underscore-min-1.4.2.js"></script>
+    <script src="gl-matrix-min.js"></script>
+    <script src="util.js"></script>
+    <script src="3d.js"></script>
+    <script src="gamepads.js"></script>
+    <script src="main.js"></script>
+    <!-- shaders -->
+    <script id="cell-random-noise-fs" type="x-shader/x-fragment">
+        #version 100
+		    precision highp float;
+		    varying vec2 fragmentPosition;
+		    uniform vec2 seed;
+		    float rand (vec2 co){
+    			return fract (sin (dot (co.xy ,vec2 (12.9898,78.233))) * 43758.5453);
+			}
+		    void main (void) {
+		    	float noise = rand (fragmentPosition + seed);
+		    	float alive = noise > 0.6 ? 1.0 : 0.0;
+		        gl_FragColor = vec4 (alive, 1, noise, 1.0);
+		    }
+		</script>
+    <script id="cell-update-from-bitmap-fs" type="x-shader/x-fragment">
+        #version 100
+		    precision highp float;
+		    varying vec2 texCoord;
+		    uniform sampler2D source;
+		    vec3 RGBToHSL(vec3 color) {
+				vec3 hsl;
+				float fmin = min(min(color.r, color.g), color.b);
+				float fmax = max(max(color.r, color.g), color.b);
+				float delta = fmax - fmin;
+				hsl.z = (fmax + fmin) / 2.0;
+				if (delta == 0.0) {
+					hsl.x = 0.0;
+					hsl.y = 0.0;
+				}
+				else {
+					if (hsl.z < 0.5)
+						hsl.y = delta / (fmax + fmin); // Saturation
+					else
+						hsl.y = delta / (2.0 - fmax - fmin); // Saturation
+					float deltaR = (((fmax - color.r) / 6.0) + (delta / 2.0)) / delta;
+					float deltaG = (((fmax - color.g) / 6.0) + (delta / 2.0)) / delta;
+					float deltaB = (((fmax - color.b) / 6.0) + (delta / 2.0)) / delta;
+					if (color.r == fmax )
+						hsl.x = deltaB - deltaG; // Hue
+					else if (color.g == fmax)
+						hsl.x = (1.0 / 3.0) + deltaR - deltaB; // Hue
+					else if (color.b == fmax)
+						hsl.x = (2.0 / 3.0) + deltaG - deltaR; // Hue
+					if (hsl.x < 0.0)
+						hsl.x += 1.0; // Hue
+					else if (hsl.x > 1.0)
+						hsl.x -= 1.0; // Hue
+				}
+				return hsl;
+			}
+		    void main (void) {
+		    	vec4 sourceColor = texture2D (source, texCoord);
+		    	vec3 hsl = RGBToHSL (sourceColor.xyz);
+		    	float alive = hsl.z > 0.25 ? 1.0 : 0.0;
+		        gl_FragColor = vec4 (alive, hsl.y, hsl.x, 1.0);
+		    }
+		</script>
+    <script id="cell-iteration-fs" type="x-shader/x-fragment">
+        #version 100
+		    precision highp float;
+		    varying vec2 texCoord;
+		    uniform sampler2D previousStep;
+		    uniform vec2 screenSpace;
+		    uniform sampler2D rules;
+		    uniform float activeRules;
+		    uniform float rulesOffset;
+		    uniform float swirlFactor;
+		    vec4 pixelAt (vec2 offset) {
+		    	return texture2D (previousStep, texCoord + offset * screenSpace);
+		    }
+		    /* circular interpolation */
+			float clerp (float a, float b) {
+			    float distance = a - b;
+			    float absDistance = abs (distance);
+			    if (absDistance > 0.5) {
+			        distance = sign (distance) * (absDistance - 1.0);
+			    }
+			    return fract (distance * (0.5 - sign (distance)*swirlFactor) + b);
+			}
+		    float blendCell (vec4 a, float b) {
+		    	if (a.x > 0.5) {
+		    		return b < 0.0 ? a.z : clerp (a.z, b);
+		    	} else {
+		    		return b;
+		    	}
+		    }
+		    vec4 step (vec4 cell, sampler2D previousStep) {
+		    	vec4 n1 = pixelAt (vec2 (-1.0, -1.0));
+		    	vec4 n2 = pixelAt (vec2 ( 0.0, -1.0));
+		    	vec4 n3 = pixelAt (vec2 ( 1.0, -1.0));
+		    	vec4 n4 = pixelAt (vec2 ( 1.0,  0.0));
+		    	vec4 n5 = pixelAt (vec2 ( 1.0,  1.0));
+		    	vec4 n6 = pixelAt (vec2 ( 0.0,  1.0));
+		    	vec4 n7 = pixelAt (vec2 (-1.0,  1.0));
+		    	vec4 n8 = pixelAt (vec2 (-1.0,  0.0));
+		    	float sum = n1.x + n2.x + n3.x + n4.x + n5.x + n6.x + n7.x + n8.x;
+		    	vec4 decision = texture2D (rules, vec2 (sum / 16.0, rulesOffset + fract (cell.z * 6.0) * (activeRules / 4.0)));
+		    	if (cell.x < 0.9 && decision.g > 0.0) {
+			    	float color = blendCell (n1, blendCell (n2, blendCell (n3, blendCell (n4,
+			    					blendCell (n5, blendCell (n6, blendCell (n7, blendCell (n8, -1.0))))))));
+		    		return vec4 (1.0, 1.0, color, 1.0);
+		    	} else if (cell.x > 0.0 && decision.r > 0.0) {
+		    		return vec4 (0.0, 1.0, cell.z, 1.0);
+		    	} else {
+		    		return cell * vec4 (1.0, 0.994, 1.0, 1.0);
+		    	}
+		    }
+		    void main (void) {
+		    	//gl_FragColor = vec4 (texture2D (rules, texCoord).xyz, 1.0);
+		    	gl_FragColor = step (pixelAt (vec2 ( 0,  0)), previousStep);
+		    }
+		</script>
+    <script id="cell-copy-brush-fs" type="x-shader/x-fragment">
+        #version 100
+		    precision mediump float;
+		    varying vec2 fragmentPosition;
+		    uniform vec2 origin;
+		    uniform vec2 scale;
+		    uniform sampler2D source;
+		    void main (void) {
+		        gl_FragColor = texture2D (source, (fragmentPosition*scale + origin + 1.0) * 0.5);
+		    }
+		</script>
+    <script id="cell-bake-brush-fs" type="x-shader/x-fragment">
+        #version 100
+		    precision highp float;
+		    varying vec2 fragmentPosition;
+		    varying vec2 texCoord;
+		    uniform sampler2D cells;
+		    uniform sampler2D brush;
+		    uniform sampler2D rules;
+		    uniform float activeRules;
+		    uniform float rulesOffset;
+		    uniform float swirlFactor;
+		    uniform vec2 screenSpace;
+		    uniform vec2 origin;
+		    uniform vec2 scale;
+		    uniform vec3 color;
+		    uniform bool animate;
+			vec4 pixelAt (vec2 offset) {
+		    	return texture2D (cells, texCoord + offset * screenSpace);
+		    }
+		    /* circular interpolation */
+			float clerp (float a, float b) {
+			    float distance = a - b;
+			    float absDistance = abs (distance);
+			    if (absDistance > 0.5) {
+			        distance = sign (distance) * (absDistance - 1.0);
+			    }
+			    return fract (distance * (0.5 - sign (distance)*swirlFactor) + b);
+			}
+		    float blendCell (vec4 a, float b) {
+		    	if (a.x > 0.5) {
+		    		return b < 0.0 ? a.z : clerp (a.z, b);
+		    	} else {
+		    		return b;
+		    	}
+		    }
+		    vec4 step (vec4 cell, sampler2D previousStep) {
+		    	vec4 n1 = pixelAt (vec2 (-1.0, -1.0));
+		    	vec4 n2 = pixelAt (vec2 ( 0.0, -1.0));
+		    	vec4 n3 = pixelAt (vec2 ( 1.0, -1.0));
+		    	vec4 n4 = pixelAt (vec2 ( 1.0,  0.0));
+		    	vec4 n5 = pixelAt (vec2 ( 1.0,  1.0));
+		    	vec4 n6 = pixelAt (vec2 ( 0.0,  1.0));
+		    	vec4 n7 = pixelAt (vec2 (-1.0,  1.0));
+		    	vec4 n8 = pixelAt (vec2 (-1.0,  0.0));
+		    	float sum = n1.x + n2.x + n3.x + n4.x + n5.x + n6.x + n7.x + n8.x;
+		    	vec4 decision = texture2D (rules, vec2 (sum / 16.0, rulesOffset + fract (cell.z * 6.0) * (activeRules / 4.0)));
+		    	if (cell.x < 0.9 && decision.g > 0.0) {
+			    	float color = blendCell (n1, blendCell (n2, blendCell (n3, blendCell (n4,
+			    					blendCell (n5, blendCell (n6, blendCell (n7, blendCell (n8, -1.0))))))));
+		    		return vec4 (1.0, 1.0, color, 1.0);
+		    	} else if (cell.x > 0.0 && decision.r > 0.0) {
+		    		return vec4 (0.0, 1.0, cell.z, 1.0);
+		    	} else {
+		    		return cell * vec4 (1.0, 0.994, 1.0, 1.0);
+		    	}
+		    }
+		    void main (void) {
+		    	vec4 cell = pixelAt (vec2 ( 0,  0));
+		    	if (animate) {
+			    	cell = step (cell, cells);
+		    	}
+		    	vec2 texCoord = (((fragmentPosition - origin) / scale) + 1.0) * 0.5;
+		    	vec2 dist = texCoord - vec2 (0.5, 0.5);
+		    	if (dot (dist, dist) > 0.25) {
+		    		gl_FragColor = cell;
+		    	} else {
+		        	vec4 srcCell = texture2D (brush, texCoord);
+		        	if (srcCell.x > 0.5) {
+		        		gl_FragColor = vec4 (1.0, 1.0, srcCell.z, 1.0); /* born */
+		        	} else {
+		        		gl_FragColor = cell;
+		        	}
+		        }
+		    }
+		</script>
+    <script id="cell-brush-fs" type="x-shader/x-fragment">
+        #version 100
+		    precision highp float;
+		    varying vec2 fragmentPosition;
+		    varying vec2 texCoord;
+		    uniform sampler2D cells;
+		    uniform sampler2D rules;
+		    uniform float activeRules;
+		    uniform float rulesOffset;
+		    uniform float swirlFactor;
+		    uniform vec2 brushPosition1;
+		    uniform vec2 brushPosition2;
+		    uniform float brushSize;
+		    uniform mat4 pixelSpace;
+		    uniform vec2 screenSpace;
+		    uniform vec2 seed;
+		    uniform bool noise;
+		    uniform bool animate;
+		    uniform float hue;
+		    uniform float fill;
+		    float rand (vec2 co) {
+    			return fract (sin (dot (co.xy ,vec2 (12.9898,78.233))) * 43758.5453) > 0.6 ? 1.0 : 0.0;
+			}
+		    float dotdot (vec2 x) { return dot (x, x); }
+		    float distToSegmentSquared (vec2 v, vec2 w, vec2 p) {
+				float l2 = dotdot (v - w);
+				if (l2 == 0.0) return dotdot (p - v);
+				float t = dot(p - v, w - v) / l2;
+				if (t < 0.0) return dotdot (p - v);
+				else if (t > 1.0) return dotdot (p - w);
+				vec2 projection = v + t * (w - v);
+				return dotdot (p - projection);
+			}
+			vec4 pixelAt (vec2 offset) {
+		    	return texture2D (cells, texCoord + offset * screenSpace);
+		    }
+		    /* circular interpolation */
+			float clerp (float a, float b) {
+			    float distance = a - b;
+			    float absDistance = abs (distance);
+			    if (absDistance > 0.5) {
+			        distance = sign (distance) * (absDistance - 1.0);
+			    }
+			    return fract (distance * (0.5 - sign (distance)*swirlFactor) + b);
+			}
+		    float blendCell (vec4 a, float b) {
+		    	if (a.x > 0.5) {
+		    		return b < 0.0 ? a.z : clerp (a.z, b);
+		    	} else {
+		    		return b;
+		    	}
+		    }
+		    vec4 step (vec4 cell, sampler2D previousStep) {
+		    	vec4 n1 = pixelAt (vec2 (-1.0, -1.0));
+		    	vec4 n2 = pixelAt (vec2 ( 0.0, -1.0));
+		    	vec4 n3 = pixelAt (vec2 ( 1.0, -1.0));
+		    	vec4 n4 = pixelAt (vec2 ( 1.0,  0.0));
+		    	vec4 n5 = pixelAt (vec2 ( 1.0,  1.0));
+		    	vec4 n6 = pixelAt (vec2 ( 0.0,  1.0));
+		    	vec4 n7 = pixelAt (vec2 (-1.0,  1.0));
+		    	vec4 n8 = pixelAt (vec2 (-1.0,  0.0));
+		    	float sum = n1.x + n2.x + n3.x + n4.x + n5.x + n6.x + n7.x + n8.x;
+		    	vec4 decision = texture2D (rules, vec2 (sum / 16.0, rulesOffset + fract (cell.z * 6.0) * (activeRules / 4.0)));
+		    	if (cell.x < 0.9 && decision.g > 0.0) {
+			    	float color = blendCell (n1, blendCell (n2, blendCell (n3, blendCell (n4,
+			    					blendCell (n5, blendCell (n6, blendCell (n7, blendCell (n8, -1.0))))))));
+		    		return vec4 (1.0, 1.0, color, 1.0);
+		    	} else if (cell.x > 0.0 && decision.r > 0.0) {
+		    		return vec4 (0.0, 1.0, cell.z, 1.0);
+		    	} else {
+		    		return cell * vec4 (1.0, 0.994, 1.0, 1.0);
+		    	}
+		    }
+		    void main (void) {
+		    	if (distToSegmentSquared (
+		    		(vec4(brushPosition1,1,1)*pixelSpace).xy,
+		    		(vec4(brushPosition2,1,1)*pixelSpace).xy,
+		    		(vec4(fragmentPosition,1,1)*pixelSpace).xy) < brushSize * brushSize) {
+		    		gl_FragColor = vec4 (fill * (noise ? rand (seed + fragmentPosition) : 1.0), 0.98, hue, fill);
+		    	} else {
+		    		vec4 cell = pixelAt (vec2 (0,  0));
+		    		if (animate) {
+				    	gl_FragColor = step (cell, cells);
+			    	} else {
+			    		gl_FragColor = cell;
+			    	}
+		    	}
+		    }
+		</script>
+    <script id="cell-vs-pixeloffset" type="x-shader/x-vertex">
+        #version 100
+			precision highp float;
+		    attribute vec3 position;
+		    uniform vec2 pixelOffset;
+		    varying vec2 fragmentPosition;
+		    varying vec2 texCoord;
+		    void main (void) {
+		    	fragmentPosition = position.xy;
+		    	texCoord = (position.xy + 1.0) * 0.5;
+		        gl_Position = vec4 (position.xy + pixelOffset, 0.0, 1.0);
+		    }
+		</script>
+    <script id="cell-vs" type="x-shader/x-vertex">
+        #version 100
+			precision mediump float;
+		    attribute vec3 position;
+		    varying vec2 fragmentPosition;
+		    varying vec2 texCoord;
+		    void main (void) {
+		    	fragmentPosition = position.xy;
+		    	texCoord = (position.xy + 1.0) * 0.5;
+		        gl_Position = vec4 (position.xy, 0.0, 1.0);
+		    }
+		</script>
+    <script id="draw-cells-fs" type="x-shader/x-fragment">
+        #version 100
+		    precision mediump float;
+		    varying vec2 texCoord;
+		    uniform sampler2D cells;
+		    float pi = 3.14159265358979323846264;
+			vec3 hue (float H)
+			{
+				float R = abs(H * 6.0 - 3.0) - 1.0;
+				float G = 2.0 - abs(H * 6.0 - 2.0);
+				float B = 2.0 - abs(H * 6.0 - 4.0);
+				return clamp(vec3(R,G,B), 0.0, 1.0);
+			}
+			vec3 hsl (float h, float s, float l) {
+				vec3 RGB = hue (h);
+				float C = (1.0 - abs(2.0 * l - 1.0)) * s;
+				return (RGB - 0.5) * C + l;
+			}
+		    void main (void) {
+		    	vec4 cell = texture2D (cells, texCoord);
+		    	float colorOffset = sin(cell.z*pi*6.0);
+		    	gl_FragColor = vec4 (hsl (
+		    		fract (cell.z + cell.x * colorOffset*0.05),
+		    		1.0,
+		    		cell.y * 0.5 + cell.x * (1.0 - abs(colorOffset)) * 0.15) * cell.w, 1.0);
+		    }
+		</script>
+    <script id="brush-selection-cursor-fs" type="x-shader/x-fragment">
+        #version 100
+		    precision mediump float;
+		    varying vec2 texCoord;
+		    uniform sampler2D color;
+		    void main (void) {
+		    	vec4 v = texture2D (color, texCoord);
+		    	gl_FragColor = vec4 (1.0 - v.x, 0.0, 1.0 - v.z, 1.0);
+		    }
+		</script>
+    <script id="simple-vs" type="x-shader/x-vertex">
+        #version 100
+			precision mediump float;
+		    attribute vec3 position;
+		 	varying vec2 texCoord;
+		 	uniform mat4 transform;
+		    void main (void) {
+		    	texCoord = ((position + 1.0) * 0.5).xy;
+		        gl_Position = transform * vec4 (position, 1.0);
+		    }
+		</script>
+</head>
+
+<body>
+    <div class="viewport-container">
+        <canvas class="viewport" width=2048 height=1024></canvas>
+        <splash class="btn" enabled></splash>
+        <button class="btn" enabled></button>
+        <button1 class="btn" enabled></button1>
+        <button2 class="btn" enabled></button2>
+        <button3 class="btn" enabled></button3>
+        <button4 class="btn" enabled></button4>
+        <buttonl class="btn" enabled></buttonl>
+        <buttonr class="btn" enabled></buttonr>
+        <crosshairs class="btn" enabled></crosshairs>
+    </div>
+</body></html>
